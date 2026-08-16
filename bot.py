@@ -8,8 +8,7 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Парсер скачивается Render во время Build
-sys.path.insert(0, "/opt/parser_avito")
+sys.path.insert(0, "parser_avito")
 
 from dto import AvitoConfig
 from parser_cls import AvitoParse
