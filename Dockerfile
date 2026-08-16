@@ -1,34 +1,53 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
+# ---------------------------------------------------------
+# Системные зависимости
+# ---------------------------------------------------------
+
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
+    git \
+    curl \
     ca-certificates \
-    fonts-liberation \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libgtk-3-0 \
-    libgbm1 \
-    libasound2 \
-    libx11-xcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libxshmfence1 \
-    libxfixes3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# ---------------------------------------------------------
+# Скачиваем оригинальный Avito Parser
+# ---------------------------------------------------------
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN git clone --depth 1 \
+    https://github.com/Duff89/parser_avito.git \
+    /opt/parser_avito
 
-RUN playwright install chromium
+# ---------------------------------------------------------
+# Зависимости оригинального парсера
+# ---------------------------------------------------------
 
-COPY . .
+RUN pip install --no-cache-dir \
+    -r /opt/parser_avito/requirements.txt
 
-CMD ["python", "bot.py"]
+# ---------------------------------------------------------
+# Зависимости нашего Telegram-бота
+# ---------------------------------------------------------
+
+RUN pip install --no-cache-dir \
+    python-telegram-bot==22.5 \
+    Flask==3.1.2
+
+# ---------------------------------------------------------
+# Наш бот
+# ---------------------------------------------------------
+
+COPY bot.py /app/bot.py
+
+# ---------------------------------------------------------
+# Render
+# ---------------------------------------------------------
+
+EXPOSE 10000
+
+CMD ["python", "/app/bot.py"]
