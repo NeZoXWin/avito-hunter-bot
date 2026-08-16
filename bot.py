@@ -2,12 +2,10 @@ import os
 import json
 import logging
 import threading
-import re
-from urllib.parse import quote_plus
+import asyncio
 
-import requests
-from bs4 import BeautifulSoup
 from flask import Flask
+from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -66,119 +64,99 @@ def save_watchlist(watchlist):
 # Поиск Avito
 # -------------------------
 
-def search_avito(query, min_price, max_price):
+async def search_avito(query, min_price, max_price):
     url = (
         "https://www.avito.ru/omsk"
-        f"?q={quote_plus(query)}"
+        f"?q={query.replace(' ', '%20')}"
         f"&pmin={min_price}"
         f"&pmax={max_price}"
     )
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-    }
+    async with async_playwright() as p:
 
-    try:
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=20
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage"
+            ]
         )
 
-        logging.info(
-            "Avito response: status=%s length=%s url=%s",
-            response.status_code,
-            len(response.text),
-            response.url
+        page = await browser.new_page(
+            viewport={"width": 1366, "height": 768},
+            locale="ru-RU"
         )
 
-        if response.status_code != 200:
+        try:
+            logging.info("Opening Avito: %s", url)
+
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=30000
+            )
+
+            await page.wait_for_timeout(3000)
+
+            title = await page.title()
+
+            logging.info("Avito page title: %s", title)
+
+            # Получаем ссылки на объявления
+            links = await page.locator(
+                'a[href*="/items/"]'
+            ).all()
+
+            results = []
+            seen = set()
+
+            for link in links:
+
+                href = await link.get_attribute("href")
+
+                if not href:
+                    continue
+
+                if href in seen:
+                    continue
+
+                seen.add(href)
+
+                text = (await link.inner_text()).strip()
+
+                if not text:
+                    continue
+
+                if href.startswith("/"):
+                    href = "https://www.avito.ru" + href
+
+                results.append({
+                    "title": text[:200],
+                    "url": href
+                })
+
+                if len(results) >= 10:
+                    break
+
             return {
-                "status": "blocked",
-                "code": response.status_code,
+                "status": "ok",
+                "title": title,
+                "items": results
+            }
+
+        except Exception as e:
+
+            logging.exception("Avito search error")
+
+            return {
+                "status": "error",
+                "error": str(e),
                 "items": []
             }
 
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        items = []
-
-        # Ищем ссылки на объявления
-        links = soup.find_all("a", href=True)
-
-        seen = set()
-
-        for link in links:
-            href = link.get("href", "")
-
-            if "/items/" not in href:
-                continue
-
-            if href in seen:
-                continue
-
-            seen.add(href)
-
-            title = link.get_text(" ", strip=True)
-
-            if not title:
-                continue
-
-            # Пытаемся найти цену рядом с объявлением
-            parent = link
-
-            for _ in range(5):
-                if parent.parent:
-                    parent = parent.parent
-
-            text = parent.get_text(" ", strip=True)
-
-            price_match = re.search(
-                r"(\d[\d\s]*)\s*₽",
-                text
-            )
-
-            price = None
-
-            if price_match:
-                try:
-                    price = int(
-                        price_match.group(1)
-                        .replace(" ", "")
-                    )
-                except ValueError:
-                    pass
-
-            if not href.startswith("http"):
-                href = "https://www.avito.ru" + href
-
-            items.append({
-                "title": title[:150],
-                "price": price,
-                "url": href
-            })
-
-            if len(items) >= 10:
-                break
-
-        return {
-            "status": "ok",
-            "code": response.status_code,
-            "items": items
-        }
-
-    except requests.RequestException as e:
-        logging.exception("Avito request failed")
-        return {
-            "status": "error",
-            "error": str(e),
-            "items": []
-        }
+        finally:
+            await browser.close()
 
 
 # -------------------------
@@ -186,6 +164,7 @@ def search_avito(query, min_price, max_price):
 # -------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if update.effective_user.id != USER_ID:
         return
 
@@ -195,46 +174,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start — запуск\n"
         "/id — показать ID\n"
         "/watch — добавить мониторинг\n"
-        "/search — выполнить поиск\n"
+        "/search — поиск Avito\n"
         "/list — список мониторингов\n"
         "/clear — очистить мониторинг"
     )
 
 
 async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
         f"Твой Telegram ID: {update.effective_user.id}"
     )
 
 
 async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if update.effective_user.id != USER_ID:
         return
 
     if len(context.args) < 3:
+
         await update.message.reply_text(
             "Формат:\n"
             "/watch запрос минимальная_цена максимальная_цена\n\n"
             "Пример:\n"
             "/watch видеокарта 5000 15000"
         )
+
         return
 
     try:
         min_price = int(context.args[-2])
         max_price = int(context.args[-1])
+
     except ValueError:
+
         await update.message.reply_text(
             "❌ Последние два значения должны быть ценами."
         )
+
         return
 
     query = " ".join(context.args[:-2])
 
     if min_price > max_price:
+
         await update.message.reply_text(
             "❌ Минимальная цена больше максимальной."
         )
+
         return
 
     watchlist = load_watchlist()
@@ -255,25 +243,32 @@ async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if update.effective_user.id != USER_ID:
         return
 
     if len(context.args) < 3:
+
         await update.message.reply_text(
             "Формат:\n"
             "/search запрос минимальная_цена максимальная_цена\n\n"
             "Пример:\n"
             "/search видеокарта 5000 15000"
         )
+
         return
 
     try:
+
         min_price = int(context.args[-2])
         max_price = int(context.args[-1])
+
     except ValueError:
+
         await update.message.reply_text(
             "❌ Последние два значения должны быть ценами."
         )
+
         return
 
     query = " ".join(context.args[:-2])
@@ -282,53 +277,44 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔎 Ищу на Avito:\n"
         f"{query}\n"
         f"{min_price:,}–{max_price:,} ₽\n\n"
-        "⏳ Подожди..."
+        "⏳ Запускаю браузер..."
     )
 
-    result = search_avito(
+    result = await search_avito(
         query,
         min_price,
         max_price
     )
 
-    if result["status"] == "blocked":
-        await update.message.reply_text(
-            "🛑 Avito не отдал страницу.\n\n"
-            f"HTTP-код: {result['code']}\n\n"
-            "Это тест обычного HTTP-запроса. "
-            "По логам Render определим следующий способ."
-        )
-        return
-
     if result["status"] == "error":
+
         await update.message.reply_text(
-            "❌ Ошибка соединения с Avito.\n\n"
-            f"{result.get('error', 'Неизвестная ошибка')}"
+            "❌ Ошибка при открытии Avito:\n\n"
+            f"{result['error'][:1500]}"
         )
+
         return
 
     items = result["items"]
 
     if not items:
+
         await update.message.reply_text(
-            "🔎 Страница Avito получена, "
-            "но объявления не удалось извлечь.\n\n"
-            "Это тоже полезный результат теста."
+            "🔎 Avito открылся, "
+            "но объявления не удалось получить.\n\n"
+            f"Заголовок страницы:\n{result['title']}"
         )
+
         return
 
-    text = f"🔎 Найдено объявлений: {len(items)}\n\n"
+    text = (
+        f"🔎 Найдено объявлений: {len(items)}\n\n"
+    )
 
     for i, item in enumerate(items, 1):
-        price = (
-            f"{item['price']:,} ₽"
-            if item["price"]
-            else "цена не определена"
-        )
 
         text += (
             f"{i}. {item['title']}\n"
-            f"💰 {price}\n"
             f"🔗 {item['url']}\n\n"
         )
 
@@ -339,20 +325,24 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if update.effective_user.id != USER_ID:
         return
 
     watchlist = load_watchlist()
 
     if not watchlist:
+
         await update.message.reply_text(
             "📋 Активных мониторингов нет."
         )
+
         return
 
     text = "📋 Твои мониторинги:\n\n"
 
     for i, item in enumerate(watchlist, 1):
+
         text += (
             f"{i}. 🔎 {item['query']}\n"
             f"💰 {item['min_price']:,}–"
@@ -363,6 +353,7 @@ async def list_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def clear_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if update.effective_user.id != USER_ID:
         return
 
@@ -378,10 +369,12 @@ async def clear_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 
 def main():
+
     server_thread = threading.Thread(
         target=run_web_server,
         daemon=True
     )
+
     server_thread.start()
 
     app = Application.builder().token(TOKEN).build()
