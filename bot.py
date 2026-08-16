@@ -1,7 +1,9 @@
 import os
 import json
 import logging
+import threading
 
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -12,6 +14,31 @@ USER_ID = 437716810
 
 WATCH_FILE = "watchlist.json"
 
+# -------------------------
+# HTTP-сервер для Render
+# -------------------------
+
+web_app = Flask(__name__)
+
+
+@web_app.route("/")
+def home():
+    return "Avito Hunter is running!"
+
+
+@web_app.route("/health")
+def health():
+    return "OK"
+
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
+
+
+# -------------------------
+# Работа с мониторингами
+# -------------------------
 
 def load_watchlist():
     if not os.path.exists(WATCH_FILE):
@@ -28,6 +55,10 @@ def save_watchlist(watchlist):
     with open(WATCH_FILE, "w", encoding="utf-8") as f:
         json.dump(watchlist, f, ensure_ascii=False, indent=2)
 
+
+# -------------------------
+# Telegram-команды
+# -------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != USER_ID:
@@ -77,7 +108,9 @@ async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args[:-2])
 
     if min_price < 0 or max_price < 0:
-        await update.message.reply_text("❌ Цена не может быть отрицательной.")
+        await update.message.reply_text(
+            "❌ Цена не может быть отрицательной."
+        )
         return
 
     if min_price > max_price:
@@ -140,7 +173,19 @@ async def clear_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# -------------------------
+# Запуск
+# -------------------------
+
 def main():
+    # Сначала запускаем HTTP-сервер для Render
+    server_thread = threading.Thread(
+        target=run_web_server,
+        daemon=True
+    )
+    server_thread.start()
+
+    # Затем запускаем Telegram-бота
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -149,6 +194,7 @@ def main():
     app.add_handler(CommandHandler("list", list_watch))
     app.add_handler(CommandHandler("clear", clear_watch))
 
+    logging.info("Avito Hunter starting...")
     app.run_polling()
 
 
