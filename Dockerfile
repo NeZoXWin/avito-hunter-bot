@@ -1,53 +1,38 @@
-FROM python:3.11-slim
-
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
+FROM python:3.13-slim
 
 WORKDIR /app
 
-# ---------------------------------------------------------
-# Системные зависимости
-# ---------------------------------------------------------
+ENV PYTHONUNBUFFERED=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-RUN apt-get update && apt-get install -y \
-    git \
+RUN apt-get update && \
+    apt-get install -y \
     curl \
+    wget \
     ca-certificates \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libatspi2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# ---------------------------------------------------------
-# Скачиваем оригинальный Avito Parser
-# ---------------------------------------------------------
+COPY requirements.txt .
 
-RUN git clone --depth 1 \
-    https://github.com/Duff89/parser_avito.git \
-    /opt/parser_avito
+RUN pip install --no-cache-dir -r requirements.txt
 
-# ---------------------------------------------------------
-# Зависимости оригинального парсера
-# ---------------------------------------------------------
+RUN python -m playwright install chromium
 
-RUN pip install --no-cache-dir \
-    -r /opt/parser_avito/requirements.txt
+COPY bot.py .
 
-# ---------------------------------------------------------
-# Зависимости нашего Telegram-бота
-# ---------------------------------------------------------
-
-RUN pip install --no-cache-dir \
-    python-telegram-bot==22.5 \
-    Flask==3.1.2
-
-# ---------------------------------------------------------
-# Наш бот
-# ---------------------------------------------------------
-
-COPY bot.py /app/bot.py
-
-# ---------------------------------------------------------
-# Render
-# ---------------------------------------------------------
-
-EXPOSE 10000
-
-CMD ["python", "/app/bot.py"]
+CMD ["python", "bot.py"]
