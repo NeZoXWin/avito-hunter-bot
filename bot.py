@@ -1,7 +1,7 @@
 import os
-import re
 import asyncio
 import logging
+import threading
 from urllib.parse import quote
 
 from flask import Flask
@@ -43,6 +43,7 @@ def health():
 
 def run_web():
     port = int(os.environ.get("PORT", "10000"))
+
     web_app.run(
         host="0.0.0.0",
         port=port
@@ -57,7 +58,8 @@ def build_avito_url(
     query: str,
     min_price: int,
     max_price: int
-):
+) -> str:
+
     return (
         "https://www.avito.ru/omsk"
         f"?q={quote(query)}"
@@ -67,7 +69,7 @@ def build_avito_url(
 
 
 # =========================
-# PARSE AVITO
+# PLAYWRIGHT
 # =========================
 
 async def parse_avito(
@@ -144,57 +146,68 @@ async def parse_avito(
                 status
             )
 
-            # Даём странице время выполнить JS.
             await page.wait_for_timeout(5000)
 
             title = await page.title()
 
             logging.info(
-                "Avito page title: %s",
+                "Avito title: %s",
                 title
             )
 
-            # Проверяем блокировку.
             body_text = await page.locator(
                 "body"
             ).inner_text()
 
+            lower_text = body_text.lower()
+
             blocked_words = [
-                "Доступ ограничен",
-                "Слишком много запросов",
-                "429",
-                "403",
+                "доступ ограничен",
+                "слишком много запросов",
                 "captcha",
-                "проверка браузера"
+                "капча",
+                "проверка браузера",
+                "access denied",
             ]
 
-            lower_text = body_text.lower()
+            block_reason = None
 
             for word in blocked_words:
 
-                if word.lower() in lower_text:
+                if word in lower_text:
 
-                    logging.warning(
-                        "Possible Avito block: %s",
-                        word
-                    )
+                    block_reason = word
+                    break
 
-                    return {
-                        "status": status,
-                        "blocked": True,
-                        "block_reason": word,
-                        "items": []
-                    }
+            if status in (403, 429):
 
-            # Ищем карточки объявлений.
-            items = page.locator(
+                block_reason = (
+                    block_reason
+                    or f"HTTP {status}"
+                )
+
+            if block_reason:
+
+                logging.warning(
+                    "Avito block detected: %s",
+                    block_reason
+                )
+
+                return {
+                    "status": status,
+                    "blocked": True,
+                    "block_reason": block_reason,
+                    "items": []
+                }
+
+            items_locator = page.locator(
                 '[data-marker="item"]'
             )
 
-            count = await items.count()
+            count = await items_locator.count()
 
             logging.info(
-                "Found Avito cards: %s",
+                "Avito cards found: %s",
                 count
             )
 
@@ -204,11 +217,10 @@ async def parse_avito(
                 min(count, 20)
             ):
 
-                item = items.nth(i)
+                item = items_locator.nth(i)
 
                 try:
 
-                    # Заголовок
                     title_locator = item.locator(
                         '[itemprop="name"], '
                         '[data-marker="item-title"], '
@@ -223,7 +235,6 @@ async def parse_avito(
                             await title_locator.inner_text()
                         ).strip()
 
-                    # Цена
                     price_locator = item.locator(
                         '[itemprop="price"], '
                         '[data-marker="item-price"]'
@@ -246,9 +257,8 @@ async def parse_avito(
                                 or ""
                             )
 
-                    # Ссылка
                     link_locator = item.locator(
-                        'a[href]'
+                        "a[href]"
                     ).first
 
                     link = ""
@@ -263,9 +273,7 @@ async def parse_avito(
 
                         if href:
 
-                            if href.startswith(
-                                "http"
-                            ):
+                            if href.startswith("http"):
                                 link = href
 
                             else:
@@ -284,11 +292,11 @@ async def parse_avito(
                             }
                         )
 
-                except Exception as item_error:
+                except Exception as e:
 
                     logging.warning(
                         "Card parse error: %s",
-                        item_error
+                        e
                     )
 
             return {
@@ -304,7 +312,7 @@ async def parse_avito(
 
 
 # =========================
-# TELEGRAM /START
+# /START
 # =========================
 
 async def start(
@@ -317,19 +325,17 @@ async def start(
 
     await update.message.reply_text(
         "🤖 Avito Hunter работает!\n\n"
-
         "/search товар мин_цена макс_цена\n"
         "/avito_test\n"
         "/test\n"
         "/id\n\n"
-
         "Пример:\n"
         "/search видеокарта 5000 15000"
     )
 
 
 # =========================
-# TELEGRAM /TEST
+# /TEST
 # =========================
 
 async def test(
@@ -343,12 +349,12 @@ async def test(
     await update.message.reply_text(
         "✅ Telegram работает\n"
         "✅ Render работает\n"
-        "✅ Новый Playwright-парсер загружен"
+        "✅ Playwright подключён"
     )
 
 
 # =========================
-# TELEGRAM /ID
+# /ID
 # =========================
 
 async def get_id(
@@ -362,7 +368,7 @@ async def get_id(
 
 
 # =========================
-# AVITO TEST
+# /AVITO_TEST
 # =========================
 
 async def avito_test(
@@ -374,8 +380,8 @@ async def avito_test(
         return
 
     await update.message.reply_text(
-        "🌐 Запускаю настоящий Chromium...\n"
-        "⏳ Открываю Avito..."
+        "🌐 Запускаю Chromium...\n"
+        "⏳ Проверяю Avito..."
     )
 
     try:
@@ -390,22 +396,16 @@ async def avito_test(
 
             await update.message.reply_text(
                 "❌ Avito заблокировал запрос.\n\n"
-
                 f"HTTP: {result['status']}\n"
-                f"Причина: {result['block_reason']}\n\n"
-
-                "Это уже результат браузерного "
-                "запроса, а не requests."
+                f"Причина: {result['block_reason']}"
             )
 
             return
 
         await update.message.reply_text(
             "✅ Playwright получил Avito!\n\n"
-
             f"HTTP: {result['status']}\n"
-            f"Найдено карточек: "
-            f"{len(result['items'])}"
+            f"Карточек: {len(result['items'])}"
         )
 
     except Exception as e:
@@ -421,7 +421,7 @@ async def avito_test(
 
 
 # =========================
-# SEARCH
+# /SEARCH
 # =========================
 
 async def search(
@@ -474,13 +474,11 @@ async def search(
 
     await update.message.reply_text(
         "🔎 Ищу на Avito...\n\n"
-
         f"Товар: {query}\n"
         f"Цена: {min_price:,}–"
         f"{max_price:,} ₽\n"
         "📍 Омск\n\n"
-
-        "⏳ Открываю Avito через Chromium..."
+        "⏳ Загружаю страницу..."
     )
 
     try:
@@ -495,12 +493,8 @@ async def search(
 
             await update.message.reply_text(
                 "❌ Avito заблокировал запрос.\n\n"
-
                 f"HTTP: {result['status']}\n"
-                f"Причина: {result['block_reason']}\n\n"
-
-                "Попытка через Playwright "
-                "тоже получила блокировку."
+                f"Причина: {result['block_reason']}"
             )
 
             return
@@ -511,14 +505,13 @@ async def search(
 
             await update.message.reply_text(
                 "😕 Объявления не найдены.\n\n"
-
                 f"HTTP: {result['status']}\n"
                 "Карточек: 0"
             )
 
             return
 
-        message_parts = [
+        parts = [
             f"🔎 Найдено объявлений: {len(items)}\n"
         ]
 
@@ -527,28 +520,27 @@ async def search(
             start=1
         ):
 
-            title = item["title"]
-            price = item["price"]
-            link = item["url"]
-
             text = (
-                f"{index}. {title}\n"
-                f"💰 {price}\n"
+                f"{index}. {item['title']}\n"
+                f"💰 {item['price']}\n"
             )
 
-            if link:
-                text += f"🔗 {link}\n"
+            if item["url"]:
 
-            message_parts.append(text)
+                text += (
+                    f"🔗 {item['url']}\n"
+                )
 
-        message = "\n".join(
-            message_parts
-        )
+            parts.append(text)
 
-        # Telegram ограничивает размер сообщения.
+        message = "\n".join(parts)
+
         if len(message) > 4000:
 
-            message = message[:3900] + "\n..."
+            message = (
+                message[:3900]
+                + "\n..."
+            )
 
         await update.message.reply_text(
             message,
@@ -573,10 +565,6 @@ async def search(
 
 def main():
 
-    threading = __import__(
-        "threading"
-    )
-
     threading.Thread(
         target=run_web,
         daemon=True
@@ -590,24 +578,15 @@ def main():
     )
 
     telegram_app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+        CommandHandler("start", start)
     )
 
     telegram_app.add_handler(
-        CommandHandler(
-            "test",
-            test
-        )
+        CommandHandler("test", test)
     )
 
     telegram_app.add_handler(
-        CommandHandler(
-            "id",
-            get_id
-        )
+        CommandHandler("id", get_id)
     )
 
     telegram_app.add_handler(
